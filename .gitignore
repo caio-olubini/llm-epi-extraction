@@ -1,0 +1,24 @@
+# Environment and secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Data — raw PDFs and extracted outputs are not versioned
+# (raw/ is immutable source; extracted/ is reproducible from the pipeline)
+data/raw/
+data/passages/
+data/extracted/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

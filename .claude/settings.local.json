@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(pip index *)",
+      "Bash(python -c \"import instructor; print\\(instructor.__version__, instructor.__file__\\)\")",
+      "Bash(python -c \"import instructor; print\\(instructor.__file__\\)\")",
+      "Bash(pip uninstall *)"
+    ]
+  }
+}
