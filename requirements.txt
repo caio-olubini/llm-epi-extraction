@@ -1,5 +1,7 @@
-instructor
-openai
-pydantic
-pymupdf
-python-dotenv
+instructor==1.15.1
+openai==2.38.0
+pydantic==2.13.4
+pymupdf==1.27.2.3
+python-dotenv==1.2.2
+pandas==3.0.3
+ipykernel==7.2.0

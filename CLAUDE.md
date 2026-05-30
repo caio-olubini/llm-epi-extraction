@@ -131,11 +131,22 @@ LLM_MODEL=Qwen/Qwen3-8B
 pip install vllm
 vllm serve Qwen/Qwen3-8B --enable-auto-tool-choice --tool-call-parser hermes
 ```
-Or with Ollama (simpler, slower):
+Or with Ollama (simpler, runs on CPU, slower):
 ```bash
-ollama pull qwen3:8b
-# set LLM_BASE_URL=http://localhost:11434/v1
+ollama pull qwen3:8b      # or qwen3:4b for faster CPU iteration
+# set LLM_BASE_URL=http://localhost:11434/v1 and LLM_MODEL=qwen3:8b
 ```
+
+**How constrained decoding is wired (read before touching client.py):**
+The client is built with `instructor.Mode.JSON_SCHEMA` (see `src/client.py`).
+This sends the Pydantic schema in the OpenAI-standard
+`response_format={"type":"json_schema", ...}` envelope, which **both** vLLM and
+Ollama feed to their XGrammar backend to mask token logits during decoding. The
+output is schema-valid by construction, not by retry. Do **not** switch to
+`Mode.JSON` (generic json_object — the schema becomes a mere prompt hint, not a
+decoder constraint) or `Mode.TOOLS` (tool-call + validate + retry, no
+constraint). The same `BulletinSignal` class is both the decoding constraint and
+the validation contract, so they cannot drift apart.
 
 ---
 

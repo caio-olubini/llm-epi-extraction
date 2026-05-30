@@ -65,7 +65,8 @@ def main() -> None:
     args = _parse_args()
 
     if args.input is not None:
-        passages = [json.loads(line) for line in args.input.read_text(encoding="utf-8").splitlines()]
+        with args.input.open(encoding="utf-8") as fh:
+            passages = [json.loads(line) for line in fh if line.strip()]
     else:
         print("No --input provided. Running demo passage.")
         passages = _DEMO_PASSAGES

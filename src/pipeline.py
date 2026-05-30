@@ -59,10 +59,15 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
 
             signal = extract_signal(client, model, item["text"])
 
+            # The parser writes a null date when a cover yields no parseable one
+            # (the corpus is unfiltered, so some bulletins simply don't have it).
+            raw_date = item.get("bulletin_publication_date")
+            publication_date = date.fromisoformat(raw_date) if raw_date else None
+
             record = ExtractionRecord(
                 source_file=item["source_file"],
-                bulletin_publication_date=date.fromisoformat(item["bulletin_publication_date"]),
-                epi_week_reported=item["epi_week_reported"],
+                bulletin_publication_date=publication_date,
+                epi_week_reported=item.get("epi_week_reported"),
                 signal=signal,
                 model_id=model,
                 prompt_version=PROMPT_VERSION,
@@ -108,7 +113,9 @@ def _load_done_fingerprints(output_path: Path, model: str) -> set[str]:
         return set()
 
     done: set[str] = set()
-    for line in output_path.read_text(encoding="utf-8").splitlines():
+    with output_path.open(encoding="utf-8") as fh:
+        lines = [l for l in fh if l.strip()]
+    for line in lines:
         record = json.loads(line)
         passage_text = record.get("_passage_text", "")
         if passage_text:

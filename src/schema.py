@@ -14,12 +14,17 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Bump this constant on any field addition, removal, or type change.
 # The version is stored in every output record so rows can always be
 # traced back to the schema that produced them.
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
+
+# Audit cap on the verbatim evidence quote. Declared as a constant because it
+# is enforced in two places that must agree: the Field(max_length=...) contract
+# and the repairing validator below.
+EVIDENCE_SPAN_MAX_CHARS = 280
 
 
 # --- Enums -------------------------------------------------------------------
@@ -62,9 +67,16 @@ class Serotype(str, Enum):
 
 
 class GeographicScope(str, Enum):
-    """Whether the passage covers Brazil as a whole or one specific state."""
+    """Whether the passage covers Brazil as a whole or one specific state.
+
+    `not_applicable` is the abstain path for bulletins that are not about
+    arboviroses at all (the corpus is fed in unfiltered, so most bulletins are
+    off-topic). Without it the model would be forced to invent a scope on, say,
+    an antimicrobial-resistance bulletin.
+    """
     national = "nacional"
     state = "estadual"
+    not_applicable = "nao_se_aplica"
 
 
 # --- Extraction model --------------------------------------------------------
@@ -77,6 +89,20 @@ class BulletinSignal(BaseModel):
     the source corpus and reduce translation ambiguity.
     """
 
+    # Primary classification output. The corpus is fed in unfiltered (every
+    # Ministerio da Saude bulletin, not just arbovirus ones), so deciding
+    # relevance IS the experiment -- the parser never pre-filters. When this is
+    # False, every field below should take its abstain value (nao_se_aplica /
+    # nao_informado / empty list).
+    is_arbovirus_related: bool = Field(
+        description=(
+            "O boletim trata de arboviroses (dengue, chikungunya, Zika, febre amarela "
+            "ou similares)? Muitos boletins do Ministerio da Saude tratam de outros "
+            "temas (resistencia antimicrobiana, raiva, sarampo, etc.) e NAO sao "
+            "relevantes: marque false e use 'nao_se_aplica'/'nao_informado' nos demais "
+            "campos."
+        ),
+    )
     geographic_scope: GeographicScope = Field(
         description="O trecho fala do Brasil como um todo (nacional) ou de uma UF especifica (estadual)?"
     )
@@ -121,12 +147,39 @@ class BulletinSignal(BaseModel):
             "Trecho verbatim curto do boletim que justifica a avaliacao acima. "
             "Para auditoria humana."
         ),
-        max_length=280,
+        max_length=EVIDENCE_SPAN_MAX_CHARS,
     )
     requires_human_review: bool = Field(
         default=False,
         description="True quando o trecho e ambiguo ou voce nao tem confianca na extracao.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _clip_overlong_evidence(cls, data: object) -> object:
+        """Clip an over-long evidence_span to the audit cap and flag it for review.
+
+        Constrained decoding guarantees structure and enum membership, but no
+        JSON-schema decoder (XGrammar, OpenAI, or Gemini structured output)
+        enforces string max_length -- the cap is dropped when the schema becomes
+        a decoder grammar. So the model can legitimately emit an evidence_span
+        longer than the cap, which would otherwise fail validation and, after
+        instructor's retries, abort the entire batch on one passage.
+
+        A clipped verbatim prefix is still auditable; a crashed run is not. We
+        therefore truncate to the cap and force requires_human_review=True so the
+        over-run surfaces in the review queue instead of being silently trusted.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        span = data.get("evidence_span")
+        if isinstance(span, str) and len(span) > EVIDENCE_SPAN_MAX_CHARS:
+            # rstrip avoids leaving a dangling partial word's trailing space.
+            data["evidence_span"] = span[:EVIDENCE_SPAN_MAX_CHARS].rstrip()
+            data["requires_human_review"] = True
+
+        return data
 
 
 # --- Provenance wrapper ------------------------------------------------------
@@ -140,11 +193,17 @@ class ExtractionRecord(BaseModel):
     """
 
     source_file: str
-    bulletin_publication_date: date
+    # Best-effort publication date parsed from the bulletin cover. Optional
+    # because the corpus is unfiltered and some covers do not yield a parseable
+    # date; a missing date must not abort the batch (it flags the row instead).
+    bulletin_publication_date: Optional[date] = None
     # The epidemiological week the bulletin reports ON (not its publication date).
     # Bulletins publish with a lag; the forecasting model must only see features
-    # from weeks strictly before the prediction horizon.
-    epi_week_reported: str
+    # from weeks strictly before the prediction horizon. Optional and left unset
+    # by the parser: most bulletins carry no SE, and inferring the *reported*
+    # week from a multi-week report is a downstream alignment concern, not the
+    # parser's. Stored as `YYYY-SENN` when known.
+    epi_week_reported: Optional[str] = None
     signal: BulletinSignal
 
     model_id: str

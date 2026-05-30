@@ -13,8 +13,8 @@ build/
 # Data — raw PDFs and extracted outputs are not versioned
 # (raw/ is immutable source; extracted/ is reproducible from the pipeline)
 data/raw/
-data/passages/
-data/extracted/
+#data/passages/
+#data/extracted/
 
 # Notebooks
 .ipynb_checkpoints/
