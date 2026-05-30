@@ -12,13 +12,16 @@ neural forecasting system for dengue outbreaks across Brazilian states.
 
 The other modalities — SINAN/SIVEP case counts, climate variables, Google
 Trends, EBC news — are already scraped. This module handles the one that
-isn't covered in the literature: **turning the Ministério da Saúde weekly
-arbovirus bulletins (PDFs) into a structured, temporally-aligned feature
-matrix** that feeds the final forecasting model alongside the numeric channels.
+isn't covered in the literature: **turning the Ministério da Saúde bulletin
+corpus (PDFs) into a structured, temporally-aligned feature matrix** that feeds
+the final forecasting model alongside the numeric channels.
 
-The research contribution is specifically that these bulletins carry qualitative
-signal (risk framing, serotype intel, forward-looking alerts) that is NOT in the
-case-count series. This module exists to make that signal machine-readable.
+The corpus is fed in **unfiltered** — all Ministério da Saúde bulletins, not
+just arbovirus ones. Deciding relevance is the model's job (`is_arbovirus_related`
+field), and that classification is part of the research contribution. The
+qualitative signal of interest (risk framing, serotype intel, forward-looking
+alerts) is NOT in the case-count series. This module exists to make it
+machine-readable.
 
 ---
 
@@ -70,12 +73,14 @@ dengue-bulletin-extraction/
 │   ├── extract.py          ← single-passage extraction (one function, one concern)
 │   ├── pipeline.py         ← batch runner: fingerprinting, idempotency, record assembly
 │   ├── __main__.py         ← CLI entry point: `python src/ [--input X] [--output Y]`
-│   ├── parse.py            ← PDFs → passage units  [NEXT TO BUILD]
+│   ├── parse.py            ← PDFs → passage units (one passage per bulletin)
 │   └── eval.py             ← agreement metrics, Cohen's κ vs oracle [FUTURE]
 │
 ├── prompts/
-│   └── extraction_v1.md    ← versioned extraction prompt (source of truth for SYSTEM_PROMPT
+│   └── extraction_v2.md    ← versioned extraction prompt (source of truth for SYSTEM_PROMPT
 │                              in src/prompts.py — keep in sync, bump version on any change)
+│
+├── analysis.ipynb          ← loads data/extracted/signals.jsonl as a flat DataFrame
 │
 ├── notebooks/
 │   └── explore.ipynb       ← EDA only, never runs pipeline code
@@ -94,6 +99,7 @@ dengue-bulletin-extraction/
 | `extract.py` | Calling the LLM for one passage → one `BulletinSignal` |
 | `pipeline.py` | Batch loop, fingerprinting, idempotency, provenance stamping |
 | `__main__.py` | CLI argument parsing and demo mode |
+| `parse.py` | PDF corpus → passages JSONL (one row per bulletin, content-agnostic) |
 
 ---
 
@@ -107,7 +113,7 @@ git clone <repo-url> && cd dengue-bulletin-extraction
 python -m venv .venv && source .venv/bin/activate
 
 # 3. Install dependencies
-pip install instructor openai pydantic pymupdf python-dotenv
+pip install -r requirements.txt
 
 # 4. Copy env template and fill in
 cp .env.example .env
@@ -195,6 +201,12 @@ Treat it as carefully as a database migration.
   be able to invent values that downstream code cannot handle.
 - **Every ordinal enum must include a `nao_informado` member.** This gives the
   model a valid abstain path and is the primary hallucination reducer.
+- **`GeographicScope` also includes `nao_se_aplica`** for bulletins that are not
+  about arboviroses at all. Without it the model would be forced to invent a scope
+  on an AMR or rabies bulletin.
+- **`is_arbovirus_related: bool` is the first field the model fills.** When False,
+  every other field takes its abstain value. This is the classification output of
+  the experiment — do not remove it.
 - **`requires_human_review: bool` must always be present.** When True, the record
   is written to a separate review queue, not directly to the features table.
 - **`evidence_span: str` (max 280 chars) is mandatory.** Auditability of every
@@ -207,9 +219,9 @@ Before modifying the schema, check that the change is leakage-safe (see above).
 
 ---
 
-## Prompt versioning (prompts/extraction_v1.md)
+## Prompt versioning (prompts/extraction_v2.md)
 
-`prompts/extraction_v1.md` is the human-readable source of truth for the system
+`prompts/extraction_v2.md` is the human-readable source of truth for the system
 prompt. `src/prompts.py` contains the same text as a Python string.
 
 Both must be kept in sync. Both the filename and `PROMPT_VERSION` in `prompts.py`
@@ -217,12 +229,16 @@ must be bumped together on any wording change, even a typo fix. This is required
 for provenance integrity: a row in the output must be fully rerunnable by checking
 out the corresponding prompt version from git.
 
+Current version: `2026-05-extraction-v2` (schema 1.1.0). Pairs with the
+classification-first prompt that sets `is_arbovirus_related` before any signal
+extraction.
+
 ---
 
 ## Running the pipeline
 
 ```bash
-# Step 1: parse PDFs into passage units (once parse.py is built)
+# Step 1: parse all PDFs into passage units (one row per bulletin)
 python src/parse.py --input data/raw/ --output data/passages/passages.jsonl
 
 # Step 2: extract signals (idempotent, safe to re-run)
@@ -237,22 +253,27 @@ python src/eval.py --extracted data/extracted/signals.jsonl \
 python src/
 ```
 
+**Corpus:** 202 PDFs across `data/raw/2019/` – `data/raw/2026/`. The parser is
+content-agnostic — it parses every PDF regardless of topic. One bulletin
+(`2021/boletim_hanseniase_internet_-2.pdf`) is image-only (scanned, no text
+layer); it is written to the passages file with empty text and will receive an
+off-topic classification from the model.
+
 ---
 
 ## What to build next
 
 Priority order, do not skip ahead:
 
-1. **`src/parse.py`** — PDF to passage units. Each bulletin has a "Situação
-   Epidemiológica" section per disease/region; that section is the target passage.
-   Use PyMuPDF (fitz) for text extraction. Output: JSONL with fields
-   `{source_file, bulletin_publication_date, epi_week_reported, uf, text}`.
-   One row per (bulletin × UF) combination where a UF-level section exists, plus
-   one national row.
+1. **`tests/test_schema.py`** — validate that every enum member roundtrips through
+   JSON serialisation, that `requires_human_review` defaults to False, that a
+   missing `evidence_span` raises a validation error, and that an over-long
+   `evidence_span` is clipped and flips `requires_human_review` to True.
 
-2. **`tests/test_schema.py`** — validate that every enum member roundtrips through
-   JSON serialisation, that `requires_human_review` defaults to False, and that
-   a missing `evidence_span` raises a validation error.
+2. **Fix idempotency in `pipeline.py`** — `run_corpus` skips already-done passages
+   by reading a `_passage_text` field back from the output file, but never writes
+   that field. A re-run on 202 bulletins will reprocess everything and append
+   duplicates. The fingerprint must be written into the record on first pass.
 
 3. **`src/eval.py`** — agreement harness. Load a hand-labelled gold sample
    (50–100 records), compute per-field accuracy and Cohen's κ between the local
