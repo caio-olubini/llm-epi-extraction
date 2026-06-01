@@ -1,0 +1,19 @@
+# Everything that affects an extraction run's result. Secrets (LLM_BASE_URL,
+# LLM_API_KEY) live in .env.
+
+llm:
+  model: gemini-2.5-flash
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 2048
+  max_retries: 2
+
+# Prompt text and version both come from this file (its first heading carries
+# the version). CLI --input/--output override the data paths.
+prompt:
+  path: prompts/extraction_v2.md
+
+data:
+  passages: data/passages/passages.jsonl
+  signals: data/extracted/signals.jsonl
+  raw_pdfs: data/raw

@@ -35,6 +35,8 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
+from config import get_settings
+
 
 # Portuguese month names, full and abbreviated, collapse to the same 3-letter
 # key once accents are stripped (e.g. "março", "marco", "Mar." -> "mar"). This
@@ -142,21 +144,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("data/raw"),
-        help="Directory tree of PDFs to parse (default: data/raw).",
+        default=None,
+        help="Directory tree of PDFs to parse (default: data.raw_pdfs from config.yaml).",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/passages/passages.jsonl"),
-        help="JSONL file to write (default: data/passages/passages.jsonl).",
+        default=None,
+        help="JSONL file to write (default: data.passages from config.yaml).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    parse_corpus(args.input, args.output)
+    settings = get_settings()
+    input_root = args.input or settings.data.raw_pdfs
+    output_path = args.output or settings.data.passages
+    parse_corpus(input_root, output_path)
 
 
 if __name__ == "__main__":

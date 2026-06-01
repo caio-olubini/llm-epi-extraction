@@ -9,19 +9,18 @@ Usage:
 
 The demo mode runs a single hard-coded passage so you can verify the full
 pipeline is wired correctly before you have real PDF passages to process.
-Set LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL first (see .env.example).
+
+Everything that affects what gets extracted (model, sampling, prompt, paths) is
+controlled by config.yaml; connection secrets come from .env (see .env.example).
+CLI flags override the config data paths for ad-hoc runs. .env is loaded by
+config.py on import, so no explicit load_dotenv() is needed here.
 """
 
 import argparse
 import json
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-# Load .env from the project root (one directory above src/).
-# This must run before any module that reads os.environ (client.py, pipeline.py).
-load_dotenv(Path(__file__).parent.parent / ".env")
-
+from config import get_settings
 from pipeline import run_corpus
 
 
@@ -38,14 +37,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/extracted/signals.jsonl"),
-        help="JSONL file where ExtractionRecords are appended (default: data/extracted/signals.jsonl).",
+        default=None,
+        help="JSONL file where ExtractionRecords are appended (default: data.signals from config.yaml).",
     )
     return parser.parse_args()
 
 
 # A minimal synthetic passage used when no --input file is provided.
-# Replace with real parsed-PDF passages once parse.py is built.
 _DEMO_PASSAGES = [
     {
         "source_file": "boletim_se18_2024.pdf",
@@ -63,6 +61,7 @@ _DEMO_PASSAGES = [
 
 def main() -> None:
     args = _parse_args()
+    settings = get_settings()
 
     if args.input is not None:
         with args.input.open(encoding="utf-8") as fh:
@@ -71,9 +70,10 @@ def main() -> None:
         print("No --input provided. Running demo passage.")
         passages = _DEMO_PASSAGES
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    run_corpus(passages, args.output)
-    print(f"Records written to {args.output.resolve()}")
+    output_path = args.output or settings.data.signals
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    run_corpus(passages, output_path)
+    print(f"Records written to {output_path.resolve()}")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ This module owns three concerns that belong together:
        fields (model_id, prompt_version, schema_version, extracted_at) that the
        code stamps on. The model never produces provenance; the pipeline does.
 
+The model and its sampling parameters come from config.yaml.
+
 Usage:
     from pathlib import Path
     from pipeline import run_corpus
@@ -24,13 +26,13 @@ Each item in `passages` must be a dict with these keys:
 
 import hashlib
 import json
-import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 from client import build_client
+from config import get_settings
 from extract import extract_signal
-from prompts import PROMPT_VERSION
+from prompts import load_active_prompt
 from schema import SCHEMA_VERSION, ExtractionRecord
 
 
@@ -45,19 +47,29 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
         passages:    List of passage dicts (see module docstring for required keys).
         output_path: Path to the JSONL file where records are appended.
     """
-    model = os.environ["LLM_MODEL"]
+    llm = get_settings().llm
+    system_prompt, prompt_version = load_active_prompt()
     client = build_client()
 
-    already_done = _load_done_fingerprints(output_path, model)
+    already_done = _load_done_fingerprints(output_path, llm.model, prompt_version)
 
     with output_path.open("a", encoding="utf-8") as sink:
         for item in passages:
-            fingerprint = _passage_fingerprint(item["text"], model)
+            fingerprint = _passage_fingerprint(item["text"], llm.model, prompt_version)
 
             if fingerprint in already_done:
                 continue  # resume: this passage was already extracted
 
-            signal = extract_signal(client, model, item["text"])
+            signal = extract_signal(
+                client,
+                llm.model,
+                item["text"],
+                system_prompt=system_prompt,
+                temperature=llm.temperature,
+                top_p=llm.top_p,
+                max_tokens=llm.max_tokens,
+                max_retries=llm.max_retries,
+            )
 
             # The parser writes a null date when a cover yields no parseable one
             # (the corpus is unfiltered, so some bulletins simply don't have it).
@@ -69,8 +81,8 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
                 bulletin_publication_date=publication_date,
                 epi_week_reported=item.get("epi_week_reported"),
                 signal=signal,
-                model_id=model,
-                prompt_version=PROMPT_VERSION,
+                model_id=llm.model,
+                prompt_version=prompt_version,
                 schema_version=SCHEMA_VERSION,
                 extracted_at=datetime.now(timezone.utc),
             )
@@ -80,7 +92,7 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
             sink.flush()
 
 
-def _passage_fingerprint(passage: str, model: str) -> str:
+def _passage_fingerprint(passage: str, model: str, prompt_version: str) -> str:
     """Return a short hash that uniquely identifies one unit of work.
 
     The fingerprint covers the passage text, the model, and the prompt version.
@@ -93,12 +105,12 @@ def _passage_fingerprint(passage: str, model: str) -> str:
     Only the first 16 hex characters are kept (64 bits of collision resistance),
     which is more than enough for a corpus of thousands of passages.
     """
-    content = f"{model}|{PROMPT_VERSION}|{passage}"
+    content = f"{model}|{prompt_version}|{passage}"
     digest = hashlib.sha256(content.encode()).hexdigest()
     return digest[:16]
 
 
-def _load_done_fingerprints(output_path: Path, model: str) -> set[str]:
+def _load_done_fingerprints(output_path: Path, model: str, prompt_version: str) -> set[str]:
     """Return the set of fingerprints already written to the output file.
 
     Called once at the start of run_corpus so we can skip finished work.
@@ -119,5 +131,5 @@ def _load_done_fingerprints(output_path: Path, model: str) -> set[str]:
         record = json.loads(line)
         passage_text = record.get("_passage_text", "")
         if passage_text:
-            done.add(_passage_fingerprint(passage_text, model))
+            done.add(_passage_fingerprint(passage_text, model, prompt_version))
     return done

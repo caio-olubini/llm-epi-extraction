@@ -1,14 +1,14 @@
 """Build the LLM client used throughout the extraction pipeline.
 
 The client is backend-agnostic: the same code runs against a local vLLM
-server, Ollama, Maritaca, or OpenAI -- only the LLM_BASE_URL and LLM_MODEL
-env vars change. This separation means extract.py never constructs the raw
-OpenAI client itself; it only receives the wrapped client.
+server, Ollama, Maritaca, or OpenAI -- only the LLM_BASE_URL env var changes.
+This separation means extract.py never constructs the raw OpenAI client itself;
+it only receives the wrapped client. The model identifier is not read here -- it
+comes from config.yaml and is passed to extract_signal by the pipeline.
 
-Required environment variables:
+Required environment variables (from .env, loaded by config.py):
     LLM_BASE_URL  — OpenAI-compatible endpoint, e.g. http://localhost:8000/v1
     LLM_API_KEY   — API key; any non-empty string for local vLLM/Ollama
-    LLM_MODEL     — model identifier, e.g. Qwen/Qwen3-8B
 
 
 Constrained decoding -- the point of this whole setup
@@ -53,6 +53,10 @@ import os
 
 import instructor
 from openai import OpenAI
+
+# Imported for its import-time side effect: config.py calls load_dotenv(), so any
+# entry point that builds a client has .env populated before os.environ is read.
+import config  # noqa: F401
 
 
 def build_client() -> instructor.Instructor:

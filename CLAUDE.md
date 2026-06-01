@@ -57,18 +57,19 @@ prediction horizon.
 dengue-bulletin-extraction/
 │
 ├── CLAUDE.md               ← you are here
-├── pyproject.toml          ← deps, tool config
-├── .env.example            ← required env vars, no secrets
+├── requirements.txt        ← deps (no pyproject.toml)
+├── config.yaml             ← all result-affecting run config (model, sampling, prompt, paths)
+├── .env.example            ← connection + secret vars, no values
 │
 ├── data/
 │   ├── raw/                ← PDFs exactly as downloaded, never modified
-│   ├── passages/           ← parsed text units as JSONL (source_file, pub_date,
-│   │                          epi_week, text) — output of src/parse.py
+│   ├── passages/           ← parsed text units as JSONL — output of src/parse.py
 │   └── extracted/          ← validated ExtractionRecord JSONL — output of pipeline.py
 │
 ├── src/
+│   ├── config.py           ← loads config.yaml + .env; typed Settings singleton
 │   ├── schema.py           ← Pydantic models: BulletinSignal + ExtractionRecord (the spec)
-│   ├── prompts.py          ← SYSTEM_PROMPT string and PROMPT_VERSION constant
+│   ├── prompts.py          ← loads SYSTEM_PROMPT + PROMPT_VERSION from the active .md file
 │   ├── client.py           ← builds the Instructor-patched OpenAI client
 │   ├── extract.py          ← single-passage extraction (one function, one concern)
 │   ├── pipeline.py         ← batch runner: fingerprinting, idempotency, record assembly
@@ -76,25 +77,19 @@ dengue-bulletin-extraction/
 │   ├── parse.py            ← PDFs → passage units (one passage per bulletin)
 │   └── eval.py             ← agreement metrics, Cohen's κ vs oracle [FUTURE]
 │
-├── prompts/
-│   └── extraction_v2.md    ← versioned extraction prompt (source of truth for SYSTEM_PROMPT
-│                              in src/prompts.py — keep in sync, bump version on any change)
-│
-├── analysis.ipynb          ← loads data/extracted/signals.jsonl as a flat DataFrame
-│
-├── notebooks/
-│   └── explore.ipynb       ← EDA only, never runs pipeline code
-│
-└── tests/
-    └── test_schema.py      ← schema validation, sentinel values, enum coverage
+└── prompts/
+    └── extraction_v2.md    ← versioned prompt file; fenced block = system prompt sent to model;
+                               first heading carries the version tag; design notes outside the
+                               fence are for humans only and never reach the API
 ```
 
 ### Module responsibilities (one concern per file)
 
 | File | Owns |
 |---|---|
+| `config.py` | Loading config.yaml and .env into a typed `Settings` singleton |
 | `schema.py` | Pydantic data contracts — `BulletinSignal`, `ExtractionRecord`, all enums |
-| `prompts.py` | The system prompt string and its version tag |
+| `prompts.py` | Loading `SYSTEM_PROMPT` and `PROMPT_VERSION` from the active prompt file |
 | `client.py` | Building the Instructor-patched LLM client from env vars |
 | `extract.py` | Calling the LLM for one passage → one `BulletinSignal` |
 | `pipeline.py` | Batch loop, fingerprinting, idempotency, provenance stamping |
@@ -103,92 +98,78 @@ dengue-bulletin-extraction/
 
 ---
 
+## Configuration
+
+Everything that affects an extraction run's result lives in **`config.yaml`**
+(committed, no secrets). Connection credentials live in **`.env`** (gitignored).
+
+```yaml
+# config.yaml
+llm:
+  model: gemini-2.5-flash   # model identifier passed to the API
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 2048
+  max_retries: 2
+
+prompt:
+  path: prompts/extraction_v2.md
+
+data:
+  passages: data/passages/passages.jsonl
+  signals: data/extracted/signals.jsonl
+  raw_pdfs: data/raw
+```
+
+```
+# .env  (copy from .env.example, never commit)
+LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+LLM_API_KEY=your-key-here
+```
+
+`config.py` calls `load_dotenv()` on import, so `.env` is loaded for the whole
+process regardless of entry point (CLI or test). `src/schema.py` is NOT
+configurable — `SCHEMA_VERSION` is a code constant, not a tunable.
+
+---
+
 ## Setup
 
 ```bash
-# 1. Clone and enter
-git clone <repo-url> && cd dengue-bulletin-extraction
-
-# 2. Create environment
 python -m venv .venv && source .venv/bin/activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
-
-# 4. Copy env template and fill in
-cp .env.example .env
-```
-
-`.env.example`:
-```
-# Local vLLM (reproducible, paper-grade path)
-LLM_BASE_URL=http://localhost:8000/v1
-LLM_API_KEY=not-needed-for-local
-LLM_MODEL=Qwen/Qwen3-8B
-
-# Frontier oracle (label bootstrapping and ceiling benchmark only)
-# ORACLE_BASE_URL=https://chat.maritaca.ai/api
-# ORACLE_API_KEY=your-maritaca-key
-# ORACLE_MODEL=sabia-4
-```
-
-**To serve Qwen3-8B locally with constrained decoding:**
-```bash
-pip install vllm
-vllm serve Qwen/Qwen3-8B --enable-auto-tool-choice --tool-call-parser hermes
-```
-Or with Ollama (simpler, runs on CPU, slower):
-```bash
-ollama pull qwen3:8b      # or qwen3:4b for faster CPU iteration
-# set LLM_BASE_URL=http://localhost:11434/v1 and LLM_MODEL=qwen3:8b
+cp .env.example .env   # fill in LLM_BASE_URL and LLM_API_KEY
 ```
 
 **How constrained decoding is wired (read before touching client.py):**
-The client is built with `instructor.Mode.JSON_SCHEMA` (see `src/client.py`).
-This sends the Pydantic schema in the OpenAI-standard
-`response_format={"type":"json_schema", ...}` envelope, which **both** vLLM and
-Ollama feed to their XGrammar backend to mask token logits during decoding. The
-output is schema-valid by construction, not by retry. Do **not** switch to
-`Mode.JSON` (generic json_object — the schema becomes a mere prompt hint, not a
-decoder constraint) or `Mode.TOOLS` (tool-call + validate + retry, no
-constraint). The same `BulletinSignal` class is both the decoding constraint and
-the validation contract, so they cannot drift apart.
+The client is built with `instructor.Mode.JSON_SCHEMA`. This sends the Pydantic
+schema in the `response_format={"type":"json_schema", ...}` envelope, which vLLM
+and Ollama feed to their XGrammar backend to mask token logits during decoding.
+The output is schema-valid by construction, not by retry. Do **not** switch to
+`Mode.JSON` or `Mode.TOOLS`.
 
 ---
 
-## Model strategy (two-tier, do not collapse this into one)
+## Prompt versioning
 
-**Workhorse — local open model (Qwen3-4B or 8B, Apache 2.0)**
-- Runs locally, weights pinned to a specific version
-- Every paper result must be reproducible from these weights
-- Served via vLLM with XGrammar constrained decoding for schema guarantees
+The prompt file (`prompts/extraction_v2.md`) is the single source of truth:
 
-**Oracle — frontier API (Sabiá-4 or equivalent)**
-- Used *only* to bootstrap a small gold/silver validation set (~50–100 records)
-- Used to compute ceiling agreement (how close does the local model get?)
-- Results cited as "agreement with frontier oracle: κ = X.XX"
-- Never used as the production extractor — it cannot be pinned or reproduced
+- The **fenced code block** inside the file is the exact text sent to the model.
+  Everything outside the fence (design notes, changelog) is human documentation
+  and never reaches the API.
+- The **first heading** carries the version tag:
+  `# Extraction prompt — version 2026-05-extraction-v2`
+- `src/prompts.py` reads both the text and the version from that file at import
+  time. There is no second copy to sync.
 
-This design is what makes the pipeline academically defensible. Do not merge
-the two roles into one model. The distinction must be preserved in code
-(separate config keys, logged separately in provenance).
+**To create a new prompt version:**
+1. Copy the file → `prompts/extraction_v3.md`, bump the version in the heading.
+2. Edit the fenced block.
+3. Update `config.yaml` → `prompt.path: prompts/extraction_v3.md`.
 
----
+That's it. Every output record's `prompt_version` field then reflects the new tag.
 
-## Coding conventions
-
-This codebase follows a strict philosophy: **code is a communication tool**.
-
-- **Names reveal intent.** `bulletin_publication_date` not `pub_dt`. `extract_signal` not `run`.
-- **Comments explain *why*, never *what*.** If a comment describes what the code does,
-  rewrite the code until it's obvious, then delete the comment.
-- **Functions do one thing.** If you can describe a function with "and", split it.
-- **No abstraction before it is reused.** Do not create base classes, factories, or
-  plugin systems for hypothetical future requirements. Add them when the second
-  use case appears.
-- **Every record carries full provenance.** `model_id`, `prompt_version`,
-  `schema_version`, `extracted_at` are stamped in code, never by the model.
-  A record without provenance is not a valid record.
+Current version: `2026-05-extraction-v2` (schema 1.1.0).
 
 ---
 
@@ -197,118 +178,70 @@ This codebase follows a strict philosophy: **code is a communication tool**.
 The schema is the contract between the extraction step and the forecasting model.
 Treat it as carefully as a database migration.
 
-- **Enums over free strings for every categorical field.** The model must not
-  be able to invent values that downstream code cannot handle.
-- **Every ordinal enum must include a `nao_informado` member.** This gives the
-  model a valid abstain path and is the primary hallucination reducer.
-- **`GeographicScope` also includes `nao_se_aplica`** for bulletins that are not
-  about arboviroses at all. Without it the model would be forced to invent a scope
-  on an AMR or rabies bulletin.
-- **`is_arbovirus_related: bool` is the first field the model fills.** When False,
-  every other field takes its abstain value. This is the classification output of
-  the experiment — do not remove it.
-- **`requires_human_review: bool` must always be present.** When True, the record
-  is written to a separate review queue, not directly to the features table.
-- **`evidence_span: str` (max 280 chars) is mandatory.** Auditability of every
-  extraction is non-negotiable for a thesis.
-- **Schema version is a constant in schema.py, not in pyproject.toml.** Bump it
-  on any field addition, removal, or type change. The version is stored in every
-  output record.
+- **Enums over free strings for every categorical field.**
+- **Every ordinal enum must include a `nao_informado` member** — valid abstain path, primary hallucination reducer.
+- **`GeographicScope` also includes `nao_se_aplica`** for off-topic bulletins.
+- **`is_arbovirus_related: bool` is the first field the model fills.** When False, every other field takes its abstain value.
+- **`requires_human_review: bool` must always be present.**
+- **`evidence_span: str` (max 280 chars) is mandatory.** Auditability is non-negotiable.
+- **`SCHEMA_VERSION` is a constant in `schema.py`.** Bump on any field addition, removal, or type change.
 
 Before modifying the schema, check that the change is leakage-safe (see above).
-
----
-
-## Prompt versioning (prompts/extraction_v2.md)
-
-`prompts/extraction_v2.md` is the human-readable source of truth for the system
-prompt. `src/prompts.py` contains the same text as a Python string.
-
-Both must be kept in sync. Both the filename and `PROMPT_VERSION` in `prompts.py`
-must be bumped together on any wording change, even a typo fix. This is required
-for provenance integrity: a row in the output must be fully rerunnable by checking
-out the corresponding prompt version from git.
-
-Current version: `2026-05-extraction-v2` (schema 1.1.0). Pairs with the
-classification-first prompt that sets `is_arbovirus_related` before any signal
-extraction.
 
 ---
 
 ## Running the pipeline
 
 ```bash
-# Step 1: parse all PDFs into passage units (one row per bulletin)
-python src/parse.py --input data/raw/ --output data/passages/passages.jsonl
+# Parse PDFs into passages (defaults come from config.yaml)
+python src/parse.py
 
-# Step 2: extract signals (idempotent, safe to re-run)
-python src/ --input data/passages/passages.jsonl \
-            --output data/extracted/signals.jsonl
+# Extract signals (idempotent, safe to re-run)
+python src/
 
-# Step 3 (once oracle labels exist): compute agreement
-python src/eval.py --extracted data/extracted/signals.jsonl \
-                   --gold data/extracted/gold_sample.jsonl
+# Override paths via CLI flags
+python src/ --input data/passages/passages.jsonl --output data/extracted/signals.jsonl
 
-# Demo mode (no passages file needed — uses built-in synthetic passage):
+# Demo mode (no input file — uses a built-in synthetic passage)
 python src/
 ```
 
-**Corpus:** 202 PDFs across `data/raw/2019/` – `data/raw/2026/`. The parser is
-content-agnostic — it parses every PDF regardless of topic. One bulletin
-(`2021/boletim_hanseniase_internet_-2.pdf`) is image-only (scanned, no text
-layer); it is written to the passages file with empty text and will receive an
-off-topic classification from the model.
+**Corpus:** 202 PDFs across `data/raw/2019/` – `data/raw/2026/`. One bulletin
+(`2021/boletim_hanseniase_internet_-2.pdf`) is image-only; it gets empty text
+and an off-topic classification.
 
 ---
 
 ## What to build next
 
-Priority order, do not skip ahead:
-
-1. **`tests/test_schema.py`** — validate that every enum member roundtrips through
-   JSON serialisation, that `requires_human_review` defaults to False, that a
-   missing `evidence_span` raises a validation error, and that an over-long
-   `evidence_span` is clipped and flips `requires_human_review` to True.
-
-2. **Fix idempotency in `pipeline.py`** — `run_corpus` skips already-done passages
+1. **Fix idempotency in `pipeline.py`** — `run_corpus` skips already-done passages
    by reading a `_passage_text` field back from the output file, but never writes
-   that field. A re-run on 202 bulletins will reprocess everything and append
-   duplicates. The fingerprint must be written into the record on first pass.
+   that field. A re-run will reprocess everything and append duplicates. The
+   fingerprint must be written into the record on first pass.
 
-3. **`src/eval.py`** — agreement harness. Load a hand-labelled gold sample
-   (50–100 records), compute per-field accuracy and Cohen's κ between the local
-   model and (a) the human labels and (b) the oracle labels. This is the paper's
-   Table 2.
+2. **`tests/test_schema.py`** — validate enum roundtrips, `requires_human_review`
+   default, missing `evidence_span` raises, over-long `evidence_span` clips and
+   flips the flag.
+
+3. **`src/eval.py`** — agreement harness: per-field accuracy and Cohen's κ between
+   the model and hand-labelled gold sample (50–100 records).
 
 ---
 
 ## What not to do
 
-- Do not add LangChain. It adds hidden prompts, version churn, and reproducibility
-  noise. Instructor + plain Python is the right level of abstraction.
-- Do not extract numeric case counts. They are already in SINAN/SIVEP and would
-  leak the target (see leakage section above).
-- Do not call the frontier oracle model in the main extraction loop. It is for
-  label bootstrapping only.
-- Do not modify `data/raw/`. It is immutable. All transformations happen in
-  later stages.
-- Do not commit `.env`. It is gitignored. Share config via `.env.example` only.
+- Do not add LangChain.
+- Do not extract numeric case counts (leaks the forecast target).
+- Do not modify `data/raw/` — it is immutable.
+- Do not commit `.env`.
+- Do not add oracle/two-tier model config — the current single-model config is intentional.
 
 ---
 
-## Research context (condensed, for domain questions)
+## Research context
 
-- **Thesis:** Multimodal neural forecasting of dengue outbreaks across Brazilian
-  states. Integrates SINAN/SIVEP epidemiological baselines, climate variables,
-  Google Trends, EBC news, and this module's bulletin signal.
-- **Target model:** neural forecaster (LSTM or equivalent) trained at the
-  (UF, epidemiological_week) granularity.
-- **Key prior work:** Chen & Moraga 2026 (LSTM + mobility + climate, 10 cities);
-  Borges et al. 2026 Scientific Data (SINAN + GT benchmark dataset). Neither
-  uses official narrative text as a modality — that is the contribution gap
-  this module fills.
-- **Epidemiological week convention:** Brazilian SINAN uses SE (semana
-  epidemiológica) numbered 1–53. The epi-week string format in this codebase
-  is `YYYY-SENN` (e.g. `2024-SE18`).
-- **UF codes:** 2-letter IBGE abbreviations (BA, SP, RJ, ...). The national
-  aggregate row uses `uf = None`.
+- **Thesis:** Multimodal neural forecasting of dengue outbreaks across Brazilian states.
+- **Target model:** neural forecaster (LSTM or equivalent) at (UF, epi-week) granularity.
+- **Key prior work:** Chen & Moraga 2026; Borges et al. 2026 Scientific Data. Neither uses official narrative text as a modality — that is the contribution gap this module fills.
+- **Epi-week format:** `YYYY-SENN` (e.g. `2024-SE18`), Brazilian SINAN convention.
+- **UF codes:** 2-letter IBGE abbreviations. National aggregate uses `uf = None`.

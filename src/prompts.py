@@ -1,38 +1,40 @@
-"""Versioned extraction prompt.
+"""Load the active extraction prompt named in config.yaml.
 
-This module is the single place that owns the prompt string and its version tag.
-Both must be bumped together whenever any wording changes -- even a typo fix --
-because the version is written into every output record as provenance.
+The prompt text now lives in exactly one place: the fenced code block of the
+prompt file (prompts/extraction_vN.md). PROMPT_VERSION is parsed from the version
+tag in that file's first heading. This removes the old failure mode where the
+string in this module and the .md file could silently drift apart -- there is
+only one copy now, and the version travels with it for provenance.
 
-The canonical human-readable version lives in prompts/extraction_v2.md.
-The string below must match that file exactly.
+SYSTEM_PROMPT and PROMPT_VERSION are kept as module-level names so existing
+importers (extract.py, pipeline.py) need no change.
 """
 
-# Version tag written into every ExtractionRecord for provenance.
-# Format: YYYY-MM-<topic>-v<N>
-PROMPT_VERSION = "2026-05-extraction-v2"
+import re
 
-# The system prompt is written in Portuguese to match the source corpus and
-# reduce translation ambiguity when the model parses Brazilian health bulletins.
-#
-# Two-layer hallucination guard:
-#   1. "nunca invente" — explicit instruction never to invent values.
-#   2. `nao_informado` enum member — a legal abstain path so the model is never
-#      forced to guess a categorical value that is absent from the text.
-#
-# v2: the corpus is fed in unfiltered, so the first job is classification --
-# many bulletins are about other topics entirely. The prompt now tells the model
-# to set is_arbovirus_related and to abstain on every other field when the
-# bulletin is off-topic, so a non-arbovirus PDF produces a clean negative rather
-# than invented dengue signal.
-SYSTEM_PROMPT = (
-    "Voce analisa boletins epidemiologicos do Ministerio da Saude do Brasil. "
-    "Muitos NAO tratam de arboviroses (tratam de raiva, sarampo, resistencia "
-    "antimicrobiana, etc.). Primeiro decida is_arbovirus_related: marque true "
-    "apenas se o boletim tratar de dengue, chikungunya, Zika, febre amarela ou "
-    "arboviroses similares. Se for false, use 'nao_se_aplica' em geographic_scope, "
-    "'nao_informado' nos demais campos categoricos e listas vazias. "
-    "Quando for true, preencha o schema com base APENAS no que o texto afirma; "
-    "quando o texto nao mencionar um campo, use 'nao_informado' ou lista vazia -- "
-    "nunca invente. Prefira marcar requires_human_review a chutar."
-)
+from config import get_settings
+
+# Fenced code block holding the verbatim prompt text. The language tag is optional.
+_FENCE_PATTERN = re.compile(r"```[\w-]*\n(.*?)```", re.DOTALL)
+
+# "version 2026-05-extraction-v2" inside the file's first heading.
+_VERSION_PATTERN = re.compile(r"version\s+(\S+)", re.IGNORECASE)
+
+
+def load_active_prompt() -> tuple[str, str]:
+    """Return (system_prompt_text, prompt_version) from the configured prompt file."""
+    prompt_file = get_settings().prompt_path
+    text = prompt_file.read_text(encoding="utf-8")
+
+    fence = _FENCE_PATTERN.search(text)
+    if fence is None:
+        raise ValueError(f"No fenced prompt block found in {prompt_file}")
+
+    version_match = _VERSION_PATTERN.search(text.splitlines()[0])
+    if version_match is None:
+        raise ValueError(f"No 'version <tag>' in the first heading of {prompt_file}")
+
+    return fence.group(1).strip(), version_match.group(1)
+
+
+SYSTEM_PROMPT, PROMPT_VERSION = load_active_prompt()
