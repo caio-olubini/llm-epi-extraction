@@ -5,13 +5,29 @@ llm:
   model: gemini-2.5-flash
   temperature: 0.0
   top_p: 1.0
-  max_tokens: 2048
+  # gemini-2.5-flash is a "thinking" model: hidden reasoning tokens count against
+  # max_tokens, so a low cap truncates the JSON mid-output (finish_reason=length).
+  # 8192 leaves room for the reasoning budget plus the structured response.
+  max_tokens: 8192
   max_retries: 2
 
 # Prompt text and version both come from this file (its first heading carries
 # the version). CLI --input/--output override the data paths.
 prompt:
   path: prompts/extraction_v2.md
+
+# Optional passage-selection stage. When enabled, a dedicated model copies out
+# the arbovirus-relevant spans verbatim and the extraction model reads only those
+# (instead of the full bulletin). enabled: false leaves the pipeline unchanged.
+preprocess:
+  enabled: true
+  model: gemini-2.5-flash   # can differ from the extraction model above
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 8192          # see the note on llm.max_tokens (thinking budget)
+  max_retries: 2
+  prompt:
+    path: prompts/preprocess_v1.md
 
 data:
   passages: data/passages/passages.jsonl

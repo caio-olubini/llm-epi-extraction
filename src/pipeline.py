@@ -32,6 +32,7 @@ from pathlib import Path
 from client import build_client
 from config import get_settings
 from extract import extract_signal
+from preprocess import off_topic_signal, select_passages, verbatim_filter
 from prompts import load_active_prompt
 from schema import SCHEMA_VERSION, ExtractionRecord
 
@@ -47,29 +48,55 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
         passages:    List of passage dicts (see module docstring for required keys).
         output_path: Path to the JSONL file where records are appended.
     """
-    llm = get_settings().llm
+    settings = get_settings()
+    llm = settings.llm
     system_prompt, prompt_version = load_active_prompt()
     client = build_client()
 
-    already_done = _load_done_fingerprints(output_path, llm.model, prompt_version)
+    # Optional passage-selection stage. When enabled, a dedicated model copies
+    # out the arbovirus-relevant spans verbatim and the extractor reads only
+    # those. The same client serves both models (one endpoint, model name per
+    # call); only the prompt and model name differ.
+    preprocess = settings.preprocess
+    if preprocess is not None and preprocess.enabled:
+        pp_prompt, pp_version = load_active_prompt(settings.preprocess_prompt_path)
+        pp_model = preprocess.model
+    else:
+        preprocess = None  # treat an `enabled: false` block as no stage at all
+        pp_prompt = pp_version = pp_model = None
+
+    pp_tag = _preprocess_tag(pp_model, pp_version)
+    already_done = _load_done_fingerprints(output_path, llm.model, prompt_version, pp_tag)
 
     with output_path.open("a", encoding="utf-8") as sink:
         for item in passages:
-            fingerprint = _passage_fingerprint(item["text"], llm.model, prompt_version)
+            fingerprint = _passage_fingerprint(item["text"], llm.model, prompt_version, pp_tag)
 
             if fingerprint in already_done:
                 continue  # resume: this passage was already extracted
 
-            signal = extract_signal(
-                client,
-                llm.model,
-                item["text"],
-                system_prompt=system_prompt,
-                temperature=llm.temperature,
-                top_p=llm.top_p,
-                max_tokens=llm.max_tokens,
-                max_retries=llm.max_retries,
-            )
+            if preprocess is not None:
+                spans = verbatim_filter(
+                    select_passages(
+                        client,
+                        preprocess.model,
+                        item["text"],
+                        system_prompt=pp_prompt,
+                        temperature=preprocess.temperature,
+                        top_p=preprocess.top_p,
+                        max_tokens=preprocess.max_tokens,
+                        max_retries=preprocess.max_retries,
+                    ),
+                    item["text"],
+                )
+                # Nothing relevant -> off-topic bulletin: record the abstain
+                # signal directly, skipping the extraction call entirely.
+                if spans:
+                    signal = _extract(client, llm, "\n\n".join(spans), system_prompt)
+                else:
+                    signal = off_topic_signal()
+            else:
+                signal = _extract(client, llm, item["text"], system_prompt)
 
             # The parser writes a null date when a cover yields no parseable one
             # (the corpus is unfiltered, so some bulletins simply don't have it).
@@ -85,6 +112,8 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
                 prompt_version=prompt_version,
                 schema_version=SCHEMA_VERSION,
                 extracted_at=datetime.now(timezone.utc),
+                preprocess_model=pp_model,
+                preprocess_prompt_version=pp_version,
             )
 
             # Write immediately and flush so a crash does not lose the record.
@@ -92,25 +121,57 @@ def run_corpus(passages: list[dict], output_path: Path) -> None:
             sink.flush()
 
 
-def _passage_fingerprint(passage: str, model: str, prompt_version: str) -> str:
+def _extract(client, llm, text: str, system_prompt: str):
+    """Call the extraction model with the configured sampling parameters."""
+    return extract_signal(
+        client,
+        llm.model,
+        text,
+        system_prompt=system_prompt,
+        temperature=llm.temperature,
+        top_p=llm.top_p,
+        max_tokens=llm.max_tokens,
+        max_retries=llm.max_retries,
+    )
+
+
+def _preprocess_tag(model: str | None, prompt_version: str | None) -> str:
+    """Identity of the preprocessing stage for fingerprinting.
+
+    "none" when preprocessing is off, so toggling the stage on (or changing the
+    selector model / prompt) changes every passage's fingerprint and the work is
+    redone rather than wrongly skipped.
+    """
+    if model is None:
+        return "none"
+    return f"{model}:{prompt_version}"
+
+
+def _passage_fingerprint(
+    passage: str, model: str, prompt_version: str, preprocess_tag: str
+) -> str:
     """Return a short hash that uniquely identifies one unit of work.
 
-    The fingerprint covers the passage text, the model, and the prompt version.
-    This means:
+    The fingerprint covers the passage text, the model, the prompt version, and
+    the preprocessing stage's identity. This means:
     - The same passage reprocessed with a different model gets a new fingerprint
       (because model outputs differ).
     - A prompt version bump also invalidates the fingerprint (because the
       extraction instructions changed), forcing a re-run.
+    - Toggling preprocessing on/off, or changing the selector model or its
+      prompt, also invalidates it (the text the extractor sees changed).
 
     Only the first 16 hex characters are kept (64 bits of collision resistance),
     which is more than enough for a corpus of thousands of passages.
     """
-    content = f"{model}|{prompt_version}|{passage}"
+    content = f"{model}|{prompt_version}|{preprocess_tag}|{passage}"
     digest = hashlib.sha256(content.encode()).hexdigest()
     return digest[:16]
 
 
-def _load_done_fingerprints(output_path: Path, model: str, prompt_version: str) -> set[str]:
+def _load_done_fingerprints(
+    output_path: Path, model: str, prompt_version: str, preprocess_tag: str
+) -> set[str]:
     """Return the set of fingerprints already written to the output file.
 
     Called once at the start of run_corpus so we can skip finished work.
@@ -131,5 +192,5 @@ def _load_done_fingerprints(output_path: Path, model: str, prompt_version: str) 
         record = json.loads(line)
         passage_text = record.get("_passage_text", "")
         if passage_text:
-            done.add(_passage_fingerprint(passage_text, model, prompt_version))
+            done.add(_passage_fingerprint(passage_text, model, prompt_version, preprocess_tag))
     return done

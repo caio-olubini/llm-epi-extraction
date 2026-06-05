@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field, model_validator
 # Bump this constant on any field addition, removal, or type change.
 # The version is stored in every output record so rows can always be
 # traced back to the schema that produced them.
-SCHEMA_VERSION = "1.1.0"
+#
+# - 1.2.0: added preprocess_model / preprocess_prompt_version provenance to
+#          ExtractionRecord (null when the preprocessing stage is disabled).
+# - 1.1.0: added is_arbovirus_related + nao_se_aplica for the unfiltered corpus.
+SCHEMA_VERSION = "1.2.0"
 
 # Audit cap on the verbatim evidence quote. Declared as a constant because it
 # is enforced in two places that must agree: the Field(max_length=...) contract
@@ -210,3 +214,10 @@ class ExtractionRecord(BaseModel):
     prompt_version: str
     schema_version: str = SCHEMA_VERSION
     extracted_at: datetime
+
+    # Provenance for the optional passage-selection stage. Null when preprocessing
+    # is disabled (the extractor saw the full passage); set to the selector model
+    # and its prompt version when it ran, so runs with vs without preprocessing --
+    # or with a different selector -- stay distinguishable and reproducible.
+    preprocess_model: Optional[str] = None
+    preprocess_prompt_version: Optional[str] = None

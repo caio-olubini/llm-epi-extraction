@@ -11,6 +11,7 @@ importers (extract.py, pipeline.py) need no change.
 """
 
 import re
+from pathlib import Path
 
 from config import get_settings
 
@@ -21,9 +22,15 @@ _FENCE_PATTERN = re.compile(r"```[\w-]*\n(.*?)```", re.DOTALL)
 _VERSION_PATTERN = re.compile(r"version\s+(\S+)", re.IGNORECASE)
 
 
-def load_active_prompt() -> tuple[str, str]:
-    """Return (system_prompt_text, prompt_version) from the configured prompt file."""
-    prompt_file = get_settings().prompt_path
+def load_active_prompt(prompt_path: Path | None = None) -> tuple[str, str]:
+    """Return (system_prompt_text, prompt_version) from a prompt file.
+
+    Defaults to the extraction prompt named in config.yaml. Pass an explicit
+    path to load any other prompt file that follows the same convention (a
+    fenced block holding the verbatim text, a `version <tag>` in the first
+    heading) -- e.g. the optional preprocess prompt.
+    """
+    prompt_file = prompt_path or get_settings().prompt_path
     text = prompt_file.read_text(encoding="utf-8")
 
     fence = _FENCE_PATTERN.search(text)
